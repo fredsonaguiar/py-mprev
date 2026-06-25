@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name='pymprev',
@@ -6,7 +6,7 @@ setup(
     description='Python Preventive Maitenance Document Explorer',
     # author='',
     # author_email='',
-    packages=find_packages(),
+    packages=['pymprev'],
     install_requires=[
         "kuzu",
         "chromadb",
