@@ -8,8 +8,11 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_neo4j.graph_transformers.llm import LLMGraphTransformer
 
+# querying
+from langchain_neo4j import GraphCypherQAChain
 
-class Ingestor:
+
+class GraphRAG:
     def __init__(self, llm, embedder, graph, ontology):
         self.llm = llm
         self.embedder = embedder
@@ -151,57 +154,58 @@ class Ingestor:
         self._add_source_chunk_relations()
 
 
-def reset_databasis(graph):
-    graph.query("MATCH (n) DETACH DELETE n")
+    def run_leiden_clustering(self):
+        pass
 
 
-def remove_document(graph, filename: str):
-    # removes relations based on file
-    query_remove_relations = """
-    MATCH ()-[r {chunk_source: $filename}]->()
-    DELETE r
-    """
-        
-    # removes nodes created based on file
-    query_remove_nodes = """
-    MATCH (n)
-    WHERE n.chunk_source = $filename AND NOT n:Chunk AND NOT n:Source
-    DETACH DELETE n
-    """
-        
-    # removes chunks and connections
-    query_remove_chunks = """
-    MATCH (c:Chunk {source: $filename})
-    DETACH DELETE c
-    """
-        
-    # removes source node
-    query_remove_source = """
-    MATCH (f:Source {filename: $filename})
-    DETACH DELETE f
-    """
-
-    params = {"filename": filename}
-       
-    graph.query(query_remove_relations, params=params)
-    graph.query(query_remove_nodes, params=params)
-    graph.query(query_remove_chunks, params=params)
-    graph.query(query_remove_source, params=params)
+    def reset_databasis(self, graph):
+        graph.query("MATCH (n) DETACH DELETE n")
 
 
-def query_documents(graph, query:str, params:dict={}):
-    return query(query, params=params)
+    def remove_document(self, filename: str):
+        # removes relations based on file
+        query_remove_relations = """
+        MATCH ()-[r {chunk_source: $filename}]->() DELETE r """
+            
+        # removes nodes created based on file
+        query_remove_nodes = """
+        MATCH (n)
+        WHERE n.chunk_source = $filename AND NOT n:Chunk AND NOT n:Source
+        DETACH DELETE n """
+            
+        # removes chunks and connections
+        query_remove_chunks = """
+        MATCH (c:Chunk {source: $filename}) DETACH DELETE c """
+
+        # removes source node
+        query_remove_source = """
+        MATCH (f:Source {filename: $filename}) DETACH DELETE f """
+
+        params = {"filename": filename}
+        self.graph.query(query_remove_relations, params=params)
+        self.graph.query(query_remove_nodes, params=params)
+        self.graph.query(query_remove_chunks, params=params)
+        self.graph.query(query_remove_source, params=params)
 
 
-def query_from_text(text_query:str):
-    pass
+    def custom_query_RAG(self, text_query:str):
+        # # chain used for queries
+        # self.chain = GraphCypherQAChain.from_llm(
+        #     llm=self.llm,
+        #     )
+        pass
 
 
-def ask_documents(self, text_query:str):
-    self.llm
+    def custom_query_Graph(self, text_query:str):
+        # # chain used for queries
+        # self.chain = GraphCypherQAChain.from_llm(
+        #     llm=self.llm,
+        #     )
+        pass
 
 
-    # function: generate_reports()
-    #   reports clarifying clusters of concepts: ML for Corrosion, etc
-    #   also report how the documents are related
-    #   answers to relevant questions already in documents
+    def generate_reports(self):
+        #   reports clarifying clusters of concepts: ML for Corrosion, etc
+        #   also report how the documents are related
+        #   answers to relevant questions already in documents
+        pass
