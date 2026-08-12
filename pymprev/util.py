@@ -1,44 +1,207 @@
-import kuzu
-import chromadb
-from llama_index.llms.ollama import Ollama
-from llama_index.core import Settings
+import os
+import tqdm
+import pymupdf
 
-def initialize_servers(
-        ollama_url="http://localhost:11434",
-        kuzu_path="./test_kuzu",
-        chroma_path="./test_chroma"):
-    
-    try:
-        # Test Ollama Connection
-        # ollama = Ollama(model="llama3:8b", base_url=ollama_url)
-        Settings.llm = Ollama(model="phi3:3.8b", base_url=ollama_url,
-                        request_timeout=1000.0,
-                        additional_kwargs={"num_ctx": 2048})
-        Settings.chunk_size = 512
-        Settings.chunk_overlap = 50
-        print("🤖 Ollama: Connection established successfully.")
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_neo4j.graph_transformers.llm import LLMGraphTransformer
+
+
+class Ingestor:
+    def __init__(self, llm, embedder, graph, ontology):
+        self.llm = llm
+        self.embedder = embedder
+        self.graph = graph
+        self.ontology = ontology
+
+        # splits text into chunks
+        self.splitter = RecursiveCharacterTextSplitter(
+            # chunk_size=1000,
+            # chunk_overlap=200,
+            # separators=["\n\n", "\n", " ", ""]
+        )
+
+        # recovers structured data
+        self.graph_transformer = LLMGraphTransformer(
+            llm=self.llm,
+            allowed_nodes = self.ontology.nodes,
+            allowed_relationships = self.ontology.relations,
+            node_properties = self.ontology.node_properties,
+            relationship_properties = self.ontology.relationship_properties,
+            additional_instructions = "\n\n".join([
+                "Follow STRICTLY the Ontology:" + self.ontology.description,
+                "Answers should be always given in english."
+                ])
+        )
+
+
+    def _get_filenames(self, path:str):
+        # we assume only valid files in the directory
+        if os.path.isfile(path):
+            return [path]
+
+        if os.path.isdir(path):
+            filenames = []
+            for subpath in os.listdir(path):
+                subpath = os.path.join(path, subpath)
+                filenames += self._get_filenames(subpath)
+
+            return filenames
+
+        # raise Exception("Invalid path type found.")
+
+
+    @retry(stop=stop_after_attempt(10), wait=wait_exponential(multiplier=2))
+    def _transform_chunk(self, chunk:str):
+        document = Document(page_content=chunk)
+        return self.graph_transformer.convert_to_graph_documents([document])
+
+
+    def _add_source_file_node(self, filename: str, metadata:dict = {}):
+        query = """
+        MERGE (f:Source {filename: $filename})
+        SET f += $metadata
+        """
+        params = {"filename": filename, "metadata":metadata}
+        self.graph.query(query, params=params)
+
+
+    def _add_source_chunk_node(self, chunk_text:str, chunk_embedding, chunk_index:int, source_filename:str):
+        query = """
+        MERGE (c:Chunk {text: $text, embedding: $embedding, index: $index, source: $filename})
+        """
+        params = {
+            "text": chunk_text,
+            "embedding": chunk_embedding,
+            "index": chunk_index,
+            "filename": source_filename}
+        self.graph.query(query, params=params)
+
+
+    def _add_mentions_relations(self, node_ids, chunk_index:int, source_filename:str):
+        query = """
+        MATCH (c:Chunk {source: $filename, index: $index})
+        UNWIND $node_ids AS node_id
+        MATCH (n) WHERE n.id = node_id
+        MERGE (c)-[:MENTIONS]->(n)
+        """
+        params = {"node_ids": node_ids, "index": chunk_index, "filename": source_filename}
+        self.graph.query(query, params=params)
+
+
+    def _add_next_chunk_relations(self):
+        query = """
+        MATCH (c1:Chunk)
+        MATCH (c2:Chunk {source: c1.source, index: c1.index + 1})
+        MERGE (c1)-[:NEXT_CHUNK]->(c2)
+        """
+        self.graph.query(query)
+
+
+    def _add_source_chunk_relations(self):
+        query = """
+        MATCH (c:Chunk)
+        MATCH (f:Source {filename: c.source})
+        MERGE (f)-[:HAS_CHUNK]->(c)
+        """
+        self.graph.query(query)
+
+
+    def ingest_documents(self, input_path:str, asyncronous=False):
+        filenames = self._get_filenames(input_path)
+
+        # ingest one document at a time
+        for file_index, filename in enumerate(filenames, start=1):
+            print(f"Processing file ({file_index}/{len(filenames)}):",  filename)
+
+            doc = pymupdf.open(filename) # doc pages
+            full_text = "\n".join([page.get_text() for page in doc])
+
+            # add source file to graph
+            self._add_source_file_node(filename, doc.metadata)
+
+            # splits document in chunks
+            chunks = self.splitter.split_text(full_text)
+            for chunk_index, chunk in enumerate(tqdm.tqdm(chunks)):
+                # add shource chunk to graph
+                embedding = self.embedder.embed_query(chunk)
+                self._add_source_chunk_node(
+                    chunk_text=chunk,
+                    chunk_index=chunk_index,
+                    chunk_embedding=embedding,
+                    source_filename=filename,)
+
+                # get structured graph from chunk
+                chunk_graph = self._transform_chunk(chunk)
+                # Attach chunk properties to nodes + relationships
+                for element in chunk_graph[0].nodes + chunk_graph[0].relationships:
+                    element.properties["chunk_index"] = chunk_index
+                    element.properties["chunk_source"] = filename
+
+                self.graph.add_graph_documents(chunk_graph)
+
+                # crates chunk mentioning relation to nodes
+                node_ids = [node.id for node in chunk_graph[0].nodes]
+                self._add_mentions_relations(node_ids, chunk_index, filename)
+
+        # add global "NEXT_CHUNK" and "HAS_CHUNK" relations 
+        self._add_next_chunk_relations() 
+        self._add_source_chunk_relations()
+
+
+def reset_databasis(graph):
+    graph.query("MATCH (n) DETACH DELETE n")
+
+
+def remove_document(graph, filename: str):
+    # removes relations based on file
+    query_remove_relations = """
+    MATCH ()-[r {chunk_source: $filename}]->()
+    DELETE r
+    """
         
-        # Test Kùzu DB Initialization
-        kuzudb = kuzu.Database(database_path=kuzu_path)
-        print("📊 Kùzu DB: Embedded graph engine initialized.")
+    # removes nodes created based on file
+    query_remove_nodes = """
+    MATCH (n)
+    WHERE n.chunk_source = $filename AND NOT n:Chunk AND NOT n:Source
+    DETACH DELETE n
+    """
         
-        # Test ChromaDB Initialization
-        chroma = chromadb.PersistentClient(path=chroma_path)
-        print("🗄️ ChromaDB: Local vector client running.")
-
-        # everything ready
-        print("\n🚀 Status: Excellent! GraphRAG stack is ready.")
+    # removes chunks and connections
+    query_remove_chunks = """
+    MATCH (c:Chunk {source: $filename})
+    DETACH DELETE c
+    """
         
-    except Exception as e:
-        print(f"❌ Error encountered: {e}")
+    # removes source node
+    query_remove_source = """
+    MATCH (f:Source {filename: $filename})
+    DETACH DELETE f
+    """
 
-    return Settings.llm, kuzudb, chroma
+    params = {"filename": filename}
+       
+    graph.query(query_remove_relations, params=params)
+    graph.query(query_remove_nodes, params=params)
+    graph.query(query_remove_chunks, params=params)
+    graph.query(query_remove_source, params=params)
 
-ollama, kuzudb, chroma = initialize_servers(
-    ollama_url="http://localhost:11434",
-    kuzu_path="../databases/kuzu_db",
-    chroma_path="../databases/chroma_db")
 
-question = input("question: ")
-response = ollama.complete(question)
-print(response)
+def query_documents(graph, query:str, params:dict={}):
+    return query(query, params=params)
+
+
+def query_from_text(text_query:str):
+    pass
+
+
+def ask_documents(self, text_query:str):
+    self.llm
+
+
+    # function: generate_reports()
+    #   reports clarifying clusters of concepts: ML for Corrosion, etc
+    #   also report how the documents are related
+    #   answers to relevant questions already in documents
