@@ -9,47 +9,23 @@ GraphRAG (Graph-enhanced Retrieval-Augmented Generation) is a a methodology that
 
 ## Architecture
 
-Lightweight, Verifiable and Scalable are keyords in the proposed project. Our initial arquitecture is develloped to run locally, which avoids exposing
+The keyords in this proposed are: Lightweight; Verifiable; Scalable. Our initial arquitecture is develloped to run locally or in server, which allows scallability but also avoids exposition of potentially sensible documents, if necessary:
 
- * LlamaIndex: Orchestration, manages chunking, routes semantic data to the vector store, and maps relationship data into the graph.
-
- * Ollama: Local LLM Engine, offline background daemon that executes models locally with hardware acceleration.
-
- * Kùzu DB: In-Process Graph, a serverless, embedded property graph database. It allows running high-speed Cypher queries to explicitly discover, trace, and dynamically update missing standard dependencies.
-
- * ChromaDB: A lightweight, embedded vector store that manages dense mathematical sentence embeddings for classic semantic text retrieval.
-
- * PyMuPDF (fitz): Document Parsing. It extracts raw text and critical structural metadata (like page numbers and document properties) from dense aerospace PDFs completely offline.
+ * **[LangChain](https://www.langchain.com/):** Pipeline orchestration, deterministic document chunking (`RecursiveCharacterTextSplitter`), and prompt management.
+* **[Neo4j](https://neo4j.com/):** Unified graph and vector database. Stores document hierarchies (`:Source` -> `:Chunk`), sequential relationships (`:NEXT_CHUNK`), domain entities, dense vector embeddings, and full-text indexes in a single engine.
+<!-- * **[Ollama](https://ollama.com/):** Local LLM inference engine providing offline hardware acceleration for entity extraction and query synthesis without data leakage. -->
+<!-- * **[Sentence-Transformers](https://www.sbert.net/):** Generates dense semantic vector embeddings for chunk texts and entity resolution (e.g., `all-MiniLM-L6-v2`). -->
+<!-- * **[APOC (Awesome Procedures on Cypher)](https://neo4j.com/labs/apoc/):** Graph refactoring procedures used for automated entity deduplication and synonym node merging. -->
+* **[PyMuPDF (fitz)](https://pymupdf.readthedocs.io/):** Fast, offline PDF parser for extracting clean text and structural metadata from complex technical documents.
 
 ## Instalation
 
-First, install ollama and depencencies:
+For simple experiments using cloud-based services. Installation in a virtual environment is strongly advisable. Include the alias `--editable` for development mode:
 
 ```
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3:8b
-ollama pull mxbai-embed-large
+python -m venv path/to/venv-mprev/
+source path/to/venv-mprev/bin/activate
+pip install --editable path/to/py-mprev/
 ```
 
-For the python libraries, using a virtual environment is advised:
-
-```
-python -m venv path/to/env-mprev
-source env-mprev/bin/activate
-```
-
-Then, install the required python libraries:
-
-```
-# install llama libraries
-pip install llama-index
-pip install llama-index-llms-ollama
-pip install llama-index-embeddings-ollama
-pip install llama-index-graph-stores-kuzu
-pip install llama-index-vector-stores-chroma
-
-# install other libraries
-pip install kuzu
-pip install chromadb
-pip install pymupdf
-```
+where `path/to/venv-mprev/` is to be replace by the path one intends to create the virtual environment, and `path/to/py-mprev/` is to be replaced by the where the library is downloaded.
