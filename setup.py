@@ -10,6 +10,9 @@ setup(
     install_requires=[
         "tqdm",
         "tenacity",
+        "networkx",
+        # "graspologic",
+        "graspologic-native",
         # "kuzu",
         # "chromadb",
         "pymupdf",

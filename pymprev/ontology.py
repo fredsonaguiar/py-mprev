@@ -1,71 +1,54 @@
 
-# class Node:
-#     def __init__(self, name:str, properties:list[str], description:str):
-#         self.name = name
-#         self.properties = properties
-#         self.description = description
-
-
-# class Relation:
-#     def __init__(self, name:str, head:Node, tail:Node, properties:list[str], description:str):
-#         self.name = name
-#         self.properties = properties
-#         self.description = description
-
-#         self.head = head.name
-#         self.tail = tail.name
-
-
 class Ontology:
     def __init__(self):
         # Nodes
         self.nodes_schema = {
             # AI/ML Aspects
-            # "AIML_System": {
+            # "Aiml_system": {
             #     "properties": ["name", "description"],
             #     "description": "systems and subsystems, models, tools and products based on or using AI/ML",
             # },
-            "AIML_Element": {
+            "Aiml_element": {
                 "properties": ["definition", "purpose", "name", "description"],
                 "description": "elements or components. systems and subsystems, models, tools and products based on or using AI/ML: Neural Nets, Models, etc",
             },
-            "AIML_Resource": {
+            "Aiml_resource": {
                 "properties": ["definition", "name", "description"],
                 "description": "training sets, generators, accelerators (GPU/FPGA), libraries, parameters, hyperparameters",
             },
-            "AIML_Lifecycle_Aspect": {
+            "Aiml_lifecycle_aspect": {
                 "properties": ["key_deliverable", "definition", "name", "description"],
                 "description": "Aspects related to AI/ML development and maintenance: implementation, training, validation, deployment, etc",
             },
 
             # 
-            "Risk_Factor": {
+            "Risk_factor": {
                 "properties": ["name", "description"],
                 "description": "Risks system or component may be subject to: failures, biases, dataset distribution shifts, operational hazards, among others",
             },
-            # "Risk_Requirement": {
+            # "Risk_requirement": {
             #     "properties": ["name", "description"],
             #     "description": "Requirements a AI/ML system must comply with: functional, quantitative, qualitative, or property requirements",
             # },
-            "Risk_Mitigation_Strategy": {
+            "Risk_mitigation_strategy": {
                 "properties": ["method", "criteria", "purpose", "name", "description"],
                 "description": "means to manage, mitigate or avoid a risk: reviews, safety nets, cross-validation, fallback architectures",
             },
 
-            # "Metric_or_KPI": {
+            # "Metric_or_kpi": {
             #     "properties": ["name", "description"],
             #     "description": "relevant metrics or indicator such as: error, loss, generalization, among others",
             # },
             
-            # Governance & Metadata
-            "Organization": {
-                "properties": ["complete name", "acronym", "purpose", "name", "description"],
-                "description": "including but not limited to: begulatory bodies, OEM, suppliers, or certification authorities",
-            },
-            "Document": {
-                "properties":["title", "publication_date", "version", "name", "description"],
-                "description": "Standard recommendations, system design specs, verification report, and other relevant documents",
-            },
+            # # Governance & Metadata
+            # "Organization": {
+            #     "properties": ["complete name", "acronym", "purpose", "name", "description"],
+            #     "description": "including but not limited to: begulatory bodies, OEM, suppliers, or certification authorities",
+            # },
+            # "Document": {
+            #     "properties":["title", "publication_date", "version", "name", "description"],
+            #     "description": "Standard recommendations, system design specs, verification report, and other relevant documents",
+            # },
         }
         self.nodes = list(self.nodes_schema.keys())
         self.node_properties = True
@@ -74,58 +57,58 @@ class Ontology:
         self.relations_schema = {
             # Document & Governance Relationships
             # ("Organization", "PUBLISHES", "Document"),
-            "PUBLISHES": {
-                "heads": ["Organization"],
-                "tails": ["Document"],
-                "properties": ["date", "name", "description"],
-                "description": "A Organization is responsible for issuing, preparing, publishing a Document"
-            },
-            # ("Document", "REFERENCES", "Document"),
-            "REFERENCES": {
-                "heads": ["Document"],
-                "tails": ["Document"],
-                "properties": ["date", "name", "description"],
-                "description": "A Document might reference or cite another Document"
-            },
+            # "PUBLISHES": {
+            #     "heads": ["Organization"],
+            #     "tails": ["Document"],
+            #     "properties": ["date", "name", "description"],
+            #     "description": "A Organization is responsible for issuing, preparing, publishing a Document"
+            # },
+            # # ("Document", "REFERENCES", "Document"),
+            # "REFERENCES": {
+            #     "heads": ["Document"],
+            #     "tails": ["Document"],
+            #     "properties": ["date", "name", "description"],
+            #     "description": "A Document might reference or cite another Document"
+            # },
 
             # Model Composition
-            # ("AIML_System", "INCLUDES", "AIML_System"),
-            # ("AIML_Element", "INCLUDES", "AIML_Element"),
+            # ("Aiml_system", "INCLUDES", "Aiml_system"),
+            # ("Aiml_element", "INCLUDES", "Aiml_element"),
             "INCLUDES": {
-                "heads": ["AIML_Element"],
-                "tails": ["AIML_Element"],
+                "heads": ["Aiml_element"],
+                "tails": ["Aiml_element"],
                 "properties": ["name", "description"],
                 "description": ""
             },
-            # ("AIML_Element", "CONSUMES", "AIML_Resource"),
+            # ("Aiml_element", "CONSUMES", "Aiml_resource"),
             "CONSUMES": {
-                "heads": ["AIML_Element"],
-                "tails": ["AIML_Resource"],
+                "heads": ["Aiml_element"],
+                "tails": ["Aiml_resource"],
                 "properties": ["name", "description"],
                 "description": ""
             },
-            # ("AIML_Lifecycle_Aspect", "GOVERNS", "AIML_Element"),
+            # ("Aiml_lifecycle_aspect", "GOVERNS", "Aiml_element"),
             "GOVERNS": {
-                "heads": ["AIML_Lifecycle_Aspect"],
-                "tails": ["AIML_Element"],
+                "heads": ["Aiml_lifecycle_aspect"],
+                "tails": ["Aiml_element"],
                 "properties": ["name", "description"],
                 "description": "An AI/ML element, system or product is developed, maintained, deployed, etc."
             },
 
             # Risk & Mitigation Lifecycle            
-            # ("AIML_Element", "SUBJECT_TO", "Risk_Factor"),
-            # ("AIML_Resource", "SUBJECT_TO", "Risk_Factor"),
-            # ("AIML_Lifecycle_Aspect", "SUBJECT_TO", "Risk_Factor"),
+            # ("Aiml_element", "SUBJECT_TO", "Risk_factor"),
+            # ("Aiml_resource", "SUBJECT_TO", "Risk_factor"),
+            # ("Aiml_lifecycle_aspect", "SUBJECT_TO", "Risk_factor"),
             "SUBJECT_TO": {
-                "heads": ["AIML_Element", "AIML_Resource", "AIML_Lifecycle_Aspect"],
-                "tails": ["Risk_Factor"],
+                "heads": ["Aiml_element", "Aiml_resource", "Aiml_lifecycle_aspect"],
+                "tails": ["Risk_factor"],
                 "properties": ["name", "description"],
                 "description": "All aspects in AI/ML are associated to risks"
             },
-            # ("Risk_Factor", "MITIGATED_BY", "Risk_Mitigation_Strategy")
+            # ("Risk_factor", "MITIGATED_BY", "Risk_mitigation_strategy")
             "MITIGATED_BY": {
-                "heads": ["Risk_Factor"],
-                "tails": ["Risk_Mitigation_Strategy"],
+                "heads": ["Risk_factor"],
+                "tails": ["Risk_mitigation_strategy"],
                 "properties": ["name", "description"],
                 "description": "Mitigation strategies are recomended to mitigate risks associated to AI/ML"
             },
@@ -158,3 +141,8 @@ class Ontology:
 
         self.description = "\n\n".join([ontology_context, node_descriptions, relation_descriptions])
 
+class SafefyOntology:
+    pass
+
+class DocumentationOntology:
+    pass
