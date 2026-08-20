@@ -11,6 +11,7 @@ setup(
         "tqdm",
         "tenacity",
         "networkx",
+        "numpy",
         # "graspologic",
         "graspologic-native",
         # "kuzu",
@@ -26,6 +27,8 @@ setup(
         "langchain",
         "langchain-neo4j",
         "langchain-google-genai",
-        "langchain-text-splitters"
+        "langchain-text-splitters",
+        "langchain-huggingface",
+        "sentence-transformers"
     ],
 )

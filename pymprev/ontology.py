@@ -141,7 +141,8 @@ class Ontology:
 
         self.description = "\n\n".join([ontology_context, node_descriptions, relation_descriptions])
 
-class SafefyOntology:
+
+class AIMLSafefyOntology:
     pass
 
 class DocumentationOntology:

@@ -9,7 +9,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_neo4j.graph_transformers.llm import LLMGraphTransformer
 
 # community detection
-# import networkx
 import graspologic_native
 
 # querying
@@ -98,6 +97,140 @@ class GraphRAG:
         self.graph.query(query, params=params)
 
 
+    def _get_nodes_by_similarity(
+            self, node_type,
+            low_threshold=0.95, high_threshold=0.995, text_threshold=0.95):
+        query = """
+        MATCH (target:{node_type})
+        MATCH (duplicate:{node_type})
+        WHERE target.id < duplicate.id
+        // 1. Vector similarity check
+        WITH target, duplicate, 
+            vector.similarity.cosine(target.embedding, duplicate.embedding) AS vec_score
+        WHERE vec_score >= $low_threshold
+        // 2. Lexical Levenshtein similarity check using APOC
+        WITH target, duplicate, vec_score,
+            apoc.text.levenshteinSimilarity(toLower(target.id), toLower(duplicate.id)) AS text_score
+        // Require EITHER ultra-high vector similarity OR high vector + strong text match
+        WHERE (vec_score >= $high_threshold) 
+        OR (text_score >= $text_threshold)
+
+        RETURN target.id AS target, 
+            duplicate.id AS duplicate, 
+            vec_score,
+            text_score
+        ORDER BY vec_score DESC
+        """.format(node_type=node_type)
+
+        params={"low_threshold":low_threshold,
+                "high_threshold":high_threshold,
+                "text_threshold":text_threshold}
+        
+        unifiable = self.graph.query(query, params=params)
+        return unifiable
+
+
+    def unify_nodes_by_similarity(
+            self,
+            low_threshold=0.95, high_threshold=0.995, text_threshold=0.95):
+
+        query = """
+        UNWIND $candidates AS row
+        MATCH (target:{node_type}) WHERE target.id = row.target_id
+        MATCH (duplicate:{node_type}) WHERE duplicate.id = row.duplicate_id
+        MERGE (target)-[:TEMP_SAME_AS]-(duplicate)
+        """
+
+        merge_query = """
+        MATCH (n:{node_type})-[:TEMP_SAME_AS]-()
+        CALL apoc.path.subgraphNodes(n, {{relationshipFilter: "TEMP_SAME_AS"}}) YIELD node AS m
+        // group by n so each component is collected individually
+        WITH n, collect(DISTINCT m) AS cluster
+        WHERE size(cluster) > 1
+        // identify the representative ID for each component
+        WITH coll.min([x IN cluster | x.id]) AS rep_id, cluster
+        // deduplicate to execute 1 merge component
+        WITH DISTINCT rep_id, cluster
+        WITH
+            [x IN cluster WHERE x.id = rep_id][0] AS target,
+            [x IN cluster WHERE x.id <> rep_id] AS duplicates
+        CALL apoc.refactor.mergeNodes([target] + duplicates, {{
+            properties: {{ name: "discard", description: "combine", `.*`: "override" }},
+            mergeRels: true
+        }}) YIELD node
+        RETURN count(node) AS merged_count
+        """
+
+        cleanup_query = "MATCH ()-[r:TEMP_SAME_AS]-() DELETE r"
+
+        for node_type in self.ontology.nodes:
+            unifiable = self._get_nodes_by_similarity(
+                node_type, low_threshold, high_threshold, text_threshold)
+            
+            candidates = [{"target_id":row["target"],
+                           "duplicate_id":row["duplicate"]} for row in unifiable]
+
+            # creates temporary relations
+            self.graph.query(query.format(node_type=node_type),
+                             params={"candidates":candidates})
+
+            # merges temporary component
+            res = self.graph.query(merge_query.format(node_type=node_type))
+            merged_count = res[0]["merged_count"]
+            print(f"total merged nodes of type {node_type}: {merged_count}")
+
+            # removes temporary relations
+            self.graph.query(cleanup_query)
+
+
+    def add_knn_similarity_relations(self, score_threshold=0.8, top_k=10):
+        close_neighbors_query = """
+        MATCH (target:{target_type})
+        MATCH (duplicate:{duplicate_type}) 
+        WHERE duplicate.id <> target.id
+        WITH target, duplicate,
+            vector.similarity.cosine(target.embedding, duplicate.embedding) AS score
+        WHERE score >= $score_threshold
+        RETURN target.id as target, duplicate.id AS duplicate, score
+        """
+
+        link_query = """
+        UNWIND $candidates AS row
+        MATCH (a:{target_type} {{id: row.target_id}})
+        MATCH (b:{duplicate_type} {{id: row.duplicate_id}})
+        MERGE (a)-[r:SIMILAR_TO]-(b)
+        SET r.score = row.score
+        """
+
+        node_types = " | ".join(self.ontology.nodes)
+
+        for target_type in self.ontology.nodes:
+            print("finding similar neighbors per type:", target_type)
+            # get neighbors
+            query = close_neighbors_query.format(
+                target_type=target_type, duplicate_type=node_types)
+            results = self.graph.query(
+                query, params={"score_threshold":score_threshold})
+
+            neighbors = dict()
+            for row in results:
+                if row["target"] not in neighbors:
+                    neighbors[row["target"]] = []
+                neighbors[row["target"]].append(row)
+
+            # get most similar k
+            candidates = []
+            for target_id, row in neighbors.items():
+                top_k_row = sorted(row, key=lambda x: x["score"], reverse=True)
+                candidates += [{"target_id":target_id,
+                                "duplicate_id":row["duplicate"],
+                                "score":row["score"]} for row in top_k_row[:top_k]]
+
+            query = link_query.format(
+                target_type=target_type, duplicate_type=node_types)
+            self.graph.query(query, params={"candidates": candidates})
+
+
     def _add_next_chunk_relations(self):
         query = """
         MATCH (c1:Chunk)
@@ -133,12 +266,10 @@ class GraphRAG:
             chunks = self.splitter.split_text(full_text)
             for chunk_index, chunk in enumerate(tqdm.tqdm(chunks)):
                 # add shource chunk to graph
-                embedding = self.embedder.embed_query(chunk)
                 self._add_source_chunk_node(
                     chunk_text=chunk,
                     chunk_index=chunk_index,
-                    chunk_embedding=embedding,
-                    source_filename=filename,)
+                    source_filename=filename)
 
                 # get structured graph from chunk
                 chunk_graph = self._transform_chunk(chunk)
@@ -157,8 +288,16 @@ class GraphRAG:
         self._add_next_chunk_relations() 
         self._add_source_chunk_relations()
 
+        # computing chunk and node embeddings
+        self.reset_node_embeddings()
+        self.reset_chunk_embeddings()
 
-    def _get_ontology_subgraph(self):
+        # unify entities
+        self.unify_nodes_by_similarity()
+        self.add_knn_similarity_relations(10)
+
+
+    def _get_aiml_ontology_subgraph(self):
         # get ontology-based subgraph
         node_types = " | ".join(self.ontology.nodes)
         relation_types = " | ".join(self.ontology.relations_schema.keys())
@@ -170,6 +309,20 @@ class GraphRAG:
             target.id AS target_id
         """.format(node_types, relation_types, node_types)
         
+        result = self.graph.query(query)
+        return result
+
+
+    def _get_node_similarity_subgraph(self):
+        node_types = " | ".join(self.ontology.nodes)
+        query = """
+        MATCH (source: {node_types})-[r: SIMILAR_TO]->(target: {node_types})
+        RETURN
+            source.id AS source_id,
+            target.id AS target_id,
+            r.score as weight
+        """.format(node_types=node_types)
+                
         result = self.graph.query(query)
         return result
     
@@ -253,28 +406,19 @@ class GraphRAG:
         result = structured_llm.invoke(prompt)
 
         return result
-    
+
 
     def _add_cluster_summary(self, cluster_id, leaf_only):
         # non-cluster entity details
-        query_entities = """
-        MATCH (e)-[r:IN_CLUSTER]->(c:Cluster {id: $cluster_id})
-        WHERE NOT e:Cluster AND r.final = true
-        RETURN e.id as node_id, labels(e) AS labels, e.name as name, e.description as description
-        """
-        entities = self.graph.query(query_entities, params={"cluster_id": cluster_id})
-        entity_texts = [f"Node ID/Type: {r['node_id']}/{r['labels']} \n\t* name: {r["name"]}\n\t* description: {r["description"]}" for r in entities]
+        entities = self.get_children_entities(cluster_id)
+        entity_texts = [self._node_as_text(r['node_id'], r['labels'], r['name'], r['description']) for r in entities]
 
         # child cluster summaries
         if leaf_only:
             subcluster_texts = []
         else:
-            query_subclusters = """
-            MATCH (child:Cluster)-[:IN_CLUSTER]->(parent:Cluster {id: $cluster_id})
-            RETURN child.id AS child_id, child.name AS name, child.summary AS summary
-            """
-            subclusters = self.graph.query(query_subclusters, params={"cluster_id": cluster_id})
-            subcluster_texts = [f"Cluster ID: {r['child_id']} \n\t* name: {r["name"]}\n\t* description: {r["summary"]}" for r in subclusters]
+            subclusters = self.get_children_clusters(cluster_id)
+            subcluster_texts = [self._cluster_as_text(r['child_id'], r['name'], r['summary']) for r in subclusters]
 
         # Combine into context
         context_parts = []
@@ -315,16 +459,18 @@ class GraphRAG:
             })
 
 
-    def run_leiden_clustering(self, max_cluster_size=10, resolution=1.0):
+    def run_leiden_clustering(
+            self, max_cluster_size=10, resolution=1.0, ontology_weight=1.0):
         # access only ontology, ignoring document structure
-        subgraph = self._get_ontology_subgraph()
-        
-        # get and format edges
+        ontology_subgraph = self._get_aiml_ontology_subgraph()
+        similarity_subgraph = self._get_node_similarity_subgraph()
+
         edges = []
-        for entry in subgraph:
-            source_id = entry["source_id"]
-            target_id = entry["target_id"]
-            edges.append((source_id, target_id, 1.0))
+        for entry in ontology_subgraph:
+            edges.append((entry["source_id"], entry["target_id"], ontology_weight))
+
+        for entry in similarity_subgraph:
+            edges.append((entry["source_id"], entry["target_id"], entry["weight"]))
 
         # determine cluster structure
         clusters, level_cluster_map = self._get_leiden_clusters(
@@ -376,7 +522,135 @@ class GraphRAG:
         self.graph.query(query_remove_source, params=params)
 
 
+    def reset_chunk_embeddings(self, batch_size=1):
+
+        fetch_query = """
+        MATCH (c:Chunk)
+        RETURN elementId(c) AS id, c.text AS text
+        """
+        records = self.graph.query(fetch_query)
+        
+        # Processa em lotes
+        chunk_prefix = "title: none | text: "
+        print("seting text chunk embeddings")
+        for i in tqdm.tqdm(range(0, len(records), batch_size)):
+            batch_records = records[i : i + batch_size]
+
+            # Prepara textos com o prefixo oficial de documento
+            texts = [f"{chunk_prefix}{r['text']}" for r in batch_records]
+
+            # Vetorização em lote na GPU
+            embeddings = self.embedder.embed_documents(texts)
+
+            # Monta o payload para a atualização no Cypher
+            payload = [
+                {"id": r["id"], "embedding": emb}
+                for r, emb in zip(batch_records, embeddings)]
+
+            # Atualização em massa no Neo4j
+            update_query = """
+            UNWIND $batch AS row
+            MATCH (c) WHERE elementId(c) = row.id
+            SET c.embedding = row.embedding
+            """
+            self.graph.query(update_query, params={"batch": payload})
+
+
+    def reset_node_embeddings(self, batch_size=1):
+        fetch_query = """
+        MATCH (n : {node_type})
+        RETURN elementId(n) AS id,
+            n.id AS name_id,
+            labels(n) as type,
+            n.name AS name,
+            n.description AS description
+        """
+
+        update_query = """
+        UNWIND $batch AS row
+        MATCH (n) WHERE elementId(n) = row.id
+        SET n.embedding = row.embedding
+        """
+
+        print("seting node embeddings")
+        # Busca todos os nós que não são Chunks
+        for node_type in self.ontology.nodes:
+            print("seting node embeddings type: ", node_type)
+            fetch_query_type = fetch_query.format(node_type=node_type)
+            records = self.graph.query(fetch_query_type)
+            node_prefix = "task: clustering | query: "
+            for i in tqdm(range(0, len(records), batch_size)):
+                batch_records = records[i : i + batch_size]
+
+                # Formata o texto de cada nó e aplica o prefixo de clustering
+                texts = [
+                    f"{node_prefix}{
+                        self._node_as_text(r['name_id'], r['type'], r['name'], r['description'])}"
+                        for r in batch_records]
+
+                # Vetorização em lote na GPU
+                embeddings = self.embedder.embed_documents(texts)
+
+                payload = [
+                    {"id": r["id"], "embedding": emb}
+                    for r, emb in zip(batch_records, embeddings)]
+
+                self.graph.query(update_query, params={"batch": payload})
+                # print(f"  └─ Entidades {i} até {i + len(batch_records)} atualizadas.")
+
+
+    def get_children_clusters(self, cluster_id):
+        query_subclusters = """
+        MATCH (child:Cluster)-[:IN_CLUSTER]->(parent:Cluster {id: $cluster_id})
+        RETURN child.id AS child_id, child.name AS name, child.summary AS summary
+        """
+        subclusters = self.graph.query(query_subclusters, params={"cluster_id": cluster_id})
+        return subclusters
+    
+
+    def get_children_entities(self, cluster_id):
+        query_entities = """
+        MATCH (e)-[r:IN_CLUSTER]->(c:Cluster {id: $cluster_id})
+        WHERE NOT e:Cluster AND r.final = true
+        RETURN e.id as node_id, labels(e) AS labels, e.name as name, e.description as description
+        """
+        entities = self.graph.query(query_entities, params={"cluster_id": cluster_id})
+        return entities
+
+
+    def _cluster_as_text(self, cluster_id, name, descripion):
+        return f"Cluster ID: {cluster_id} \n\t* name: {name}\n\t* description: {descripion}"
+
+
+    def _node_as_text(self, node_id, labels, name, description):
+        return f"Node ID/Type: {node_id}/{labels} \n\t* name: {name}\n\t* description: {description}"
+
+
+    def get_cluster_details(self, cluster_id):
+        query = """
+        MATCH (c:Cluster {id: $cluster_id})
+        RETURN c.name as name, c.summary as summary, c.level as level
+        """
+        result = self.graph.query(query, params={"cluster_id":cluster_id})
+
+        name = result[0]["name"]
+        summary = result[0]["summary"]
+        level = result[0]["level"]
+
+        return name, summary, level
+
+
+    def get_cluster_ids_by_level(self, level=0):
+        query = """
+        MATCH (c:Cluster {level: $level})
+        RETURN c.id as id
+        """
+        results = self.graph.query(query, params={"level":level})
+        return [row["id"] for row in results]
+
+
     def custom_query_RAG(self, text_query:str):
+        "task: search result | query: "
         # # chain used for queries
         # self.chain = GraphCypherQAChain.from_llm(
         #     llm=self.llm,
