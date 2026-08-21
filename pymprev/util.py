@@ -249,7 +249,7 @@ class GraphRAG:
         self.graph.query(query)
 
 
-    def ingest_documents(self, input_path:str, asyncronous=False):
+    def ingest_documents(self, input_path:str):
         filenames = self._get_filenames(input_path)
 
         # ingest one document at a time
@@ -289,12 +289,12 @@ class GraphRAG:
         self._add_source_chunk_relations()
 
         # computing chunk and node embeddings
-        self.reset_node_embeddings()
-        self.reset_chunk_embeddings()
+        self.reset_node_embeddings(batch_size=10)
+        self.reset_chunk_embeddings(batch_size=10)
 
-        # unify entities
-        self.unify_nodes_by_similarity()
-        self.add_knn_similarity_relations(10)
+        # # unify entities
+        # self.unify_nodes_by_similarity()
+        # self.add_knn_similarity_relations(10)
 
 
     def _get_aiml_ontology_subgraph(self):
@@ -398,8 +398,7 @@ class GraphRAG:
                     "description": "Comprehensive synthesis of the cluster contents"
                 }
             },
-            "required": ["name", "summary"]
-        }
+            "required": ["name", "summary"]}
 
         # Pass the dict schema directly
         structured_llm = self.llm.with_structured_output(json_schema)
@@ -408,11 +407,11 @@ class GraphRAG:
         return result
 
 
-    def _add_cluster_summary(self, cluster_id, leaf_only):
+    def _get_cluster_context(self, cluster_id, leaf_only):
         # non-cluster entity details
         entities = self.get_children_entities(cluster_id)
         entity_texts = [self._node_as_text(r['node_id'], r['labels'], r['name'], r['description']) for r in entities]
-
+        
         # child cluster summaries
         if leaf_only:
             subcluster_texts = []
@@ -426,9 +425,13 @@ class GraphRAG:
             context_parts.append("### Sub-Community Summaries:\n- " + "\n\n - ".join(subcluster_texts))
         if entity_texts:
             context_parts.append("### Direct Entity Details:\n- " + "\n\n - ".join(entity_texts))
-
+        
         context = "\n\n".join(context_parts)
 
+        return context
+
+
+    def _add_cluster_summary(self, cluster_id, context):
         prompt = f"""
         Synthesize the following information for Cluster {cluster_id} into a name and a cohesive summary. 
         It contains both broader sub-community summaries and direct entity/concept details.
@@ -459,6 +462,21 @@ class GraphRAG:
             })
 
 
+    # def _add_cluster_embedding(self, cluster_id, context):
+    #     title, summary, _ = self.get_cluster_details(cluster_id)
+    #     text = f"title: {title} | text: {summary} | context: {context}"
+
+    #     embedding = self.embedder.embed_query(text)
+       
+    #     # Atualização em massa no Neo4j
+    #     update_query = """
+    #     MATCH (c:Cluster) WHERE c.id = $cluster_id
+    #     SET c.embedding = $embedding
+    #     """
+    #     params={"cluster_id": cluster_id, "embedding":embedding}
+    #     self.graph.query(update_query, params=params)
+
+
     def run_leiden_clustering(
             self, max_cluster_size=10, resolution=1.0, ontology_weight=1.0):
         # access only ontology, ignoring document structure
@@ -485,7 +503,13 @@ class GraphRAG:
             print(f"Creating bottom-up cluster summarization: level {level}")
             for cluster_id in tqdm.tqdm(level_cluster_map[level]):
                 leaf_only = level==len(level_cluster_map)-1
-                self._add_cluster_summary(cluster_id, leaf_only)
+
+                cluster_context = self._get_cluster_context(cluster_id, leaf_only)
+                self._add_cluster_summary(cluster_id, cluster_context)
+                # self._add_cluster_embedding(cluster_id, cluster_context)
+
+        # add cluster embeddings
+        self.reset_cluster_embeddings(batch_size=10)
 
 
     def reset_databasis(self):
@@ -523,37 +547,105 @@ class GraphRAG:
 
 
     def reset_chunk_embeddings(self, batch_size=1):
-
         fetch_query = """
         MATCH (c:Chunk)
         RETURN elementId(c) AS id, c.text AS text
         """
         records = self.graph.query(fetch_query)
         
-        # Processa em lotes
+        # process in batches
         chunk_prefix = "title: none | text: "
         print("seting text chunk embeddings")
         for i in tqdm.tqdm(range(0, len(records), batch_size)):
             batch_records = records[i : i + batch_size]
 
-            # Prepara textos com o prefixo oficial de documento
+            # prepares texts with document prefix
             texts = [f"{chunk_prefix}{r['text']}" for r in batch_records]
 
-            # Vetorização em lote na GPU
+            # vectorize
             embeddings = self.embedder.embed_documents(texts)
 
-            # Monta o payload para a atualização no Cypher
+            # 
             payload = [
                 {"id": r["id"], "embedding": emb}
                 for r, emb in zip(batch_records, embeddings)]
 
-            # Atualização em massa no Neo4j
+            # update database
             update_query = """
             UNWIND $batch AS row
             MATCH (c) WHERE elementId(c) = row.id
             SET c.embedding = row.embedding
             """
             self.graph.query(update_query, params={"batch": payload})
+
+        # create vector index
+        sample_vector = self.embedder.embed_query("sample")
+        vector_dim = len(sample_vector)
+        
+        query_chunk_index = """
+        CREATE VECTOR INDEX chunk_vector_index IF NOT EXISTS
+        FOR (ch:Chunk) ON (ch.embedding)
+        OPTIONS {indexConfig: {
+        `vector.similarity_function`: 'cosine',
+        `vector.dimensions`: $vector_dim
+        }}
+        """
+
+        self.graph.query(query_chunk_index, params={"vector_dim":vector_dim})
+
+        
+    def reset_cluster_embeddings(self, batch_size=1):
+        fetch_query = """
+        MATCH (c:Cluster)
+        RETURN elementId(c) AS id, c.name as name, c.summary as summary
+        """
+        records = self.graph.query(fetch_query)
+            
+        # process in batches
+        print("seting cluster embeddings")
+        for i in tqdm.tqdm(range(0, len(records), batch_size)):
+            batch_records = records[i : i + batch_size]
+    
+            # prepares texts with document prefix
+            texts = []
+            for r in batch_records:
+                cluster_id = r["id"]
+                name = r["name"]
+                summary = r["summary"]
+                context = self._get_cluster_context(cluster_id, False)
+                text = f"title: {name} | text: {summary} | context: {context}"
+                texts.append(text)
+    
+            # vectorize
+            embeddings = self.embedder.embed_documents(texts)
+    
+            # 
+            payload = [
+                {"id": r["id"], "embedding": emb}
+                for r, emb in zip(batch_records, embeddings)]
+    
+            # update database
+            update_query = """
+            UNWIND $batch AS row
+            MATCH (c) WHERE elementId(c) = row.id
+            SET c.embedding = row.embedding
+            """
+            self.graph.query(update_query, params={"batch": payload})
+        
+        # create vector index
+        sample_vector = self.embedder.embed_query("sample")
+        vector_dim = len(sample_vector)
+
+        query_cluster_index = """
+        CREATE VECTOR INDEX cluster_vector_index IF NOT EXISTS
+        FOR (c:Cluster) ON (c.embedding)
+        OPTIONS {indexConfig: {
+            `vector.similarity_function`: 'cosine',
+            `vector.dimensions`: $vector_dim
+        }}
+        """
+        
+        self.graph.query(query_cluster_index, params={"vector_dim":vector_dim})
 
 
     def reset_node_embeddings(self, batch_size=1):
@@ -573,7 +665,7 @@ class GraphRAG:
         """
 
         print("seting node embeddings")
-        # Busca todos os nós que não são Chunks
+        # gets rlevant nodes
         for node_type in self.ontology.nodes:
             print("seting node embeddings type: ", node_type)
             fetch_query_type = fetch_query.format(node_type=node_type)
@@ -582,13 +674,13 @@ class GraphRAG:
             for i in tqdm(range(0, len(records), batch_size)):
                 batch_records = records[i : i + batch_size]
 
-                # Formata o texto de cada nó e aplica o prefixo de clustering
-                texts = [
-                    f"{node_prefix}{
-                        self._node_as_text(r['name_id'], r['type'], r['name'], r['description'])}"
-                        for r in batch_records]
+                # formats texts with preffix
+                texts = []
+                for r in batch_records:
+                    text = self._node_as_text(r['name_id'], r['type'], r['name'], r['description'])
+                    texts.append(f"{node_prefix}{text}")
 
-                # Vetorização em lote na GPU
+                # vectorize in batches
                 embeddings = self.embedder.embed_documents(texts)
 
                 payload = [
@@ -596,7 +688,6 @@ class GraphRAG:
                     for r, emb in zip(batch_records, embeddings)]
 
                 self.graph.query(update_query, params={"batch": payload})
-                # print(f"  └─ Entidades {i} até {i + len(batch_records)} atualizadas.")
 
 
     def get_children_clusters(self, cluster_id):
@@ -620,6 +711,10 @@ class GraphRAG:
 
     def _cluster_as_text(self, cluster_id, name, descripion):
         return f"Cluster ID: {cluster_id} \n\t* name: {name}\n\t* description: {descripion}"
+
+
+    def _chunk_as_text(self, chunk_index, text, source):
+        return f"Chunk index {chunk_index} from document {source}:\n\t: text: {text}"
 
 
     def _node_as_text(self, node_id, labels, name, description):
@@ -649,13 +744,131 @@ class GraphRAG:
         return [row["id"] for row in results]
 
 
-    def custom_query_RAG(self, text_query:str):
-        "task: search result | query: "
-        # # chain used for queries
-        # self.chain = GraphCypherQAChain.from_llm(
-        #     llm=self.llm,
-        #     )
-        pass
+    def _retrieve_nearest_clusters(self, vector, top_k):
+        cluster_query = """
+        MATCH (c:Cluster)
+        SEARCH c IN (
+            VECTOR INDEX cluster_vector_index
+            FOR $query_vec
+            LIMIT $top_k
+        ) SCORE as score
+        RETURN c.id as id, c.name AS name, c.summary AS summary, c.level AS level, score
+        """
+
+        cluster_results = self.graph.query(
+            cluster_query, params={"query_vec":vector, "top_k":top_k})
+
+        # structured_results = [
+        #     {"id":c["id"], 
+        #      "name":c["name"],
+        #      "summary":c["summary"],
+        #      "level":c["level"],
+        #      "score":c["score"]} for c in cluster_results]
+
+        return cluster_results
+
+
+    def _retrieve_nearest_chunks(self, vector, top_k):
+        chunk_query = """
+        MATCH (c:Chunk)
+        SEARCH c IN (
+            VECTOR INDEX chunk_vector_index
+            FOR $query_vec
+            LIMIT $top_k
+        ) SCORE as score
+        RETURN c.text AS text, c.index AS index,  c.source AS source, score
+        """
+
+        chunk_results = self.graph.query(
+            chunk_query, params={"query_vec":vector, "top_k":top_k})
+        
+        # structured_results = [
+        #     {"text":c["text"],
+        #      "index":c["index"],
+        #      "source":c["source"],
+        #      "score":c["score"]} for c in chunk_results]
+        
+        return chunk_results
+
+
+    def _get_query_context(self, query_text, top_k_global, top_k_local):
+        # embbed query
+        query_prefix = "task: search result | query: "
+        query_vector = self.embedder.embed_query(f"{query_prefix}{query_text}")
+
+        # find nearest elements
+        cluster_results = self._retrieve_nearest_clusters(query_vector, top_k=top_k_global)
+        chunk_results = self._retrieve_nearest_chunks(query_vector, top_k=top_k_local)
+
+        # mount context
+        context_parts = []
+
+        if cluster_results:
+            context_parts.append("=== SUMMARIES ===")
+            for c in cluster_results:
+                cluster_relevance = f"Cluster relevance {c['score']}: "
+                cluster_text = self._cluster_as_text(c['id'], c['name'], c['summary'])
+                context_parts.append(cluster_relevance + cluster_text)
+
+        if chunk_results:
+            context_parts.append("=== SOURCE CHUNKS ===")
+            for c in chunk_results:
+                chunk_relevance = f"Text chunk relevance {c['score']}: "
+                chunk_text = self._chunk_as_text(c["index"], c["text"], c["source"])
+                context_parts.append(chunk_relevance + chunk_text)
+
+        context = "\n".join(context_parts)
+
+        return context, cluster_results, chunk_results
+
+
+    @retry(stop=stop_after_attempt(10), wait=wait_exponential(multiplier=2, min=4, max=60))
+    def _get_query_answer(self, prompt):
+        json_schema = {
+            "title": "text_query_summary",
+            "description": "Query with title and answer",
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short, descriptive title for the question and answer"
+                },
+                "answer": {
+                    "type": "string",
+                    "description": "Comprehensive answer to the question"
+                }},
+                "required": ["title", "answer"]}
+
+        # Pass the dict schema directly
+        structured_llm = self.llm.with_structured_output(json_schema)
+        result = structured_llm.invoke(prompt)
+
+        return result
+
+
+    def query_RAG(self, query_text:str, top_k_global=10, top_k_local=10):
+        # get relevant context
+        context, clusters, chunks = self._get_query_context(
+            query_text, top_k_global=top_k_global, top_k_local=top_k_local)
+
+        prompt = """
+        System: You are an expert assistant answering questions based on a Knowledge Graph context.
+        Use the high-level community summaries for broad context and specific entity relationships for factual grounding.
+        
+        Context:
+        {context}
+        
+        User Query: {query}
+
+        Answer:
+        """.format(context=context, query=query_text)
+
+        result = self._get_query_answer(prompt=prompt)
+        
+        return {"title":result["title"],
+                "answer":result["answer"],
+                "clusters": clusters,
+                "chunks": chunks}
 
 
     def custom_query_Graph(self, text_query:str):

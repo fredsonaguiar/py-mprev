@@ -19,10 +19,10 @@ def connect_llm(api_key:str, model_name:str) -> BaseLLM:
     return llm
 
 
-def connect_embeder(api_key:str, model_name:str) -> Embeddings:
+def connect_embeder(api_key:str, model_name:str, model_kwargs={}) -> Embeddings:
     # embeder = GoogleGenerativeAIEmbeddings(model=model_name, api_key=api_key)
     hf_login(api_key)
-    embeder = HuggingFaceEmbeddings(model=model_name)
+    embeder = HuggingFaceEmbeddings(model=model_name, model_kwargs=model_kwargs,)
 
     return embeder
 
